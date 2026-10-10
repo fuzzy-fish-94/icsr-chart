@@ -158,7 +158,16 @@ if st.button("生成环形图", type="primary"):
     cache = {}
     sheet_stats = {}
 
+    # MAH 编码视为“无效”的取值（空、NA、占位符）
+    BAD_MAH = {"", "nan", "na", "n/a", "none", "-", "--", "/", "null", "无", "/无/"}
+
     def get_counts(sheet_name, source_value, start, end):
+        """计数流程：
+        1) 按报告日期筛出区间内记录；
+        2) 删掉 MAH 递交编码为空 / NA / 占位符的行；
+        3) 在该区间内按 MAH 编码去重（同编码只保留第一条）；
+        4) 统计 source_value 出现次数。
+        """
         if sheet_name not in cache:
             actual = find_sheet_by_name(xl, sheet_name)
             df = pd.read_excel(xl, sheet_name=actual, header=None)
@@ -166,29 +175,45 @@ if st.button("生成环形图", type="primary"):
             if dcol is None or scol is None:
                 st.error(f"sheet '{actual}' 里没识别到日期/来源列。表头：{list(df.iloc[1].dropna())}"); st.stop()
             data = df.iloc[2:].copy()
-            mah = data.iloc[:, mcol].astype(str).str.strip() if mcol is not None else pd.Series([""] * len(data))
+            # MAH 列统一转字符串、去首尾空格；无 MAH 列就当全空
+            if mcol is None:
+                mah_series = pd.Series([""] * len(data))
+            else:
+                mah_series = data.iloc[:, mcol].apply(
+                    lambda v: "" if pd.isna(v) else str(v).strip()
+                )
             cache[sheet_name] = (
                 actual,
                 pd.to_datetime(data.iloc[:, dcol], errors="coerce"),
-                data.iloc[:, scol].astype(str).str.strip(),
-                mah,
+                data.iloc[:, scol].apply(lambda v: "" if pd.isna(v) else str(v).strip()),
+                mah_series,
             )
         actual, dates_raw, sources_raw, mah_raw = cache[sheet_name]
-        # 1) 先按日期筛
-        dmask = (dates_raw >= pd.Timestamp(start)) & (dates_raw <= pd.Timestamp(end) + pd.Timedelta(days=1) - pd.Timedelta(seconds=1))
+
+        # 1) 日期筛选（end 含当天 23:59:59）
+        dmask = (dates_raw >= pd.Timestamp(start)) & \
+                (dates_raw <= pd.Timestamp(end) + pd.Timedelta(days=1) - pd.Timedelta(seconds=1))
         n_date = int(dmask.sum())
         s = sources_raw[dmask].reset_index(drop=True)
         m = mah_raw[dmask].reset_index(drop=True)
-        # 2) 再筛掉没有 MAH 编码的
-        bad = {"", "nan", "na", "n/a", "none", "-", "/"}
-        valid = ~m.str.lower().isin(bad)
-        s = s[valid]; m = m[valid]
+
+        # 2) 删掉 MAH 为空 / NA / 占位符
+        valid_mask = ~m.str.lower().isin(BAD_MAH)
+        s = s[valid_mask].reset_index(drop=True)
+        m = m[valid_mask].reset_index(drop=True)
         n_valid = len(s)
-        # 3) 在这段时间内按 MAH 编码去重（同编码多次出现只算第一条）
-        s = s[~m.duplicated(keep="first")]
+
+        # 3) 在该区间内按 MAH 编码去重
+        keep_mask = ~m.duplicated(keep="first")
+        s = s[keep_mask].reset_index(drop=True)
+        m = m[keep_mask].reset_index(drop=True)
         n_final = len(s)
+
         sheet_stats[actual] = f"日期内 {n_date} 行 → 有MAH编码 {n_valid} 行 → 去重后 {n_final} 行"
-        return int((s == str(source_value).strip()).sum())
+
+        # 4) 计数
+        target = str(source_value).strip()
+        return int((s == target).sum())
 
     agg, product_order, category_order = {}, [], {}
     for _, row in map_df.iterrows():
