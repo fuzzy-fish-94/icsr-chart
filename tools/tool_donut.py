@@ -12,6 +12,9 @@ import pandas as pd
 import matplotlib.pyplot as plt
 import streamlit as st
 
+# SVG 导出时保留文字为可编辑文本（不要转成轮廓路径）
+plt.rcParams["svg.fonttype"] = "none"
+
 
 def normalize_name(s):
     return re.sub(r"\s+", "", str(s)).strip().lower()
