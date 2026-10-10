@@ -29,14 +29,16 @@ def find_sheet_by_name(xl, target):
 
 
 def detect_columns(header_row):
-    date_col, source_col = None, None
+    date_col, source_col, mah_col = None, None, None
     for idx, val in enumerate(header_row):
         s = str(val).lower()
         if source_col is None and "来源" in str(val):
             source_col = idx
         if date_col is None and ("获知日期" in str(val) or "received date" in s):
             date_col = idx
-    return date_col, source_col
+        if mah_col is None and ("mah" in s or "递交编码" in str(val) or "递交编号" in str(val)):
+            mah_col = idx
+    return date_col, source_col, mah_col
 
 
 def build_chart(outer_labels, outer_vals, inner_labels_map, inner_vals_map, title_text, inside_thresh=8):
@@ -83,10 +85,14 @@ def build_chart(outer_labels, outer_vals, inner_labels_map, inner_vals_map, titl
             if len(lbl) > 14:
                 words = lbl.split(); mid = len(words) // 2
                 lbl = " ".join(words[:mid]) + "\n" + " ".join(words[mid:])
+            # 内圈文字沿半径方向（径向），左半边翻转180°保证正读
             rot = ang
-            if 90 < (ang % 360) < 270:
-                rot = ang + 180
-            ax.text(x, y, lbl, ha="center", va="center", fontsize=7.5, rotation=rot, rotation_mode="anchor")
+            if ang > 90:
+                rot -= 180
+            elif ang < -90:
+                rot += 180
+            ax.text(x, y, lbl, ha="center", va="center", fontsize=7.5,
+                    rotation=rot, rotation_mode="anchor")
         else:
             outside_items.append((ang, flat_labels[i]))
 
@@ -147,19 +153,39 @@ if st.button("生成环形图", type="primary"):
 
     xl = pd.ExcelFile(f_tracking)
     cache = {}
+    sheet_stats = {}
 
     def get_counts(sheet_name, source_value, start, end):
         if sheet_name not in cache:
             actual = find_sheet_by_name(xl, sheet_name)
             df = pd.read_excel(xl, sheet_name=actual, header=None)
-            dcol, scol = detect_columns(df.iloc[1])
+            dcol, scol, mcol = detect_columns(df.iloc[1])
             if dcol is None or scol is None:
                 st.error(f"sheet '{actual}' 里没识别到日期/来源列。表头：{list(df.iloc[1].dropna())}"); st.stop()
             data = df.iloc[2:].copy()
-            cache[sheet_name] = (pd.to_datetime(data.iloc[:, dcol], errors="coerce"), data.iloc[:, scol])
-        dates, sources = cache[sheet_name]
-        mask = (dates >= pd.Timestamp(start)) & (dates <= pd.Timestamp(end) + pd.Timedelta(days=1) - pd.Timedelta(seconds=1))
-        return int(((sources.astype(str).str.strip() == str(source_value).strip()) & mask).sum())
+            mah = data.iloc[:, mcol].astype(str).str.strip() if mcol is not None else pd.Series([""] * len(data))
+            cache[sheet_name] = (
+                actual,
+                pd.to_datetime(data.iloc[:, dcol], errors="coerce"),
+                data.iloc[:, scol].astype(str).str.strip(),
+                mah,
+            )
+        actual, dates_raw, sources_raw, mah_raw = cache[sheet_name]
+        # 1) 先按日期筛
+        dmask = (dates_raw >= pd.Timestamp(start)) & (dates_raw <= pd.Timestamp(end) + pd.Timedelta(days=1) - pd.Timedelta(seconds=1))
+        n_date = int(dmask.sum())
+        s = sources_raw[dmask].reset_index(drop=True)
+        m = mah_raw[dmask].reset_index(drop=True)
+        # 2) 再筛掉没有 MAH 编码的
+        bad = {"", "nan", "na", "n/a", "none", "-", "/"}
+        valid = ~m.str.lower().isin(bad)
+        s = s[valid]; m = m[valid]
+        n_valid = len(s)
+        # 3) 在这段时间内按 MAH 编码去重（同编码多次出现只算第一条）
+        s = s[~m.duplicated(keep="first")]
+        n_final = len(s)
+        sheet_stats[actual] = f"日期内 {n_date} 行 → 有MAH编码 {n_valid} 行 → 去重后 {n_final} 行"
+        return int((s == str(source_value).strip()).sum())
 
     agg, product_order, category_order = {}, [], {}
     for _, row in map_df.iterrows():
@@ -175,17 +201,30 @@ if st.button("生成环形图", type="primary"):
             agg[prod][cat] = 0; category_order[prod].append(cat)
         agg[prod][cat] += cnt
 
-    outer_labels = product_order
-    outer_vals = [sum(agg[p].values()) for p in product_order]
-    inner_labels_map = {p: list(agg[p].keys()) for p in product_order}
-    inner_vals_map = {p: list(agg[p].values()) for p in product_order}
+    outer_labels = []
+    outer_vals = []
+    inner_labels_map = {}
+    inner_vals_map = {}
+    for p in product_order:
+        # 丢掉 0 的分类
+        cats = [(c, v) for c, v in agg[p].items() if v > 0]
+        if not cats:
+            continue  # 这个产品在本周期 0 例，不画
+        cats.sort(key=lambda t: list(agg[p].keys()).index(t[0]))
+        inner_labels_map[p] = [c for c, _ in cats]
+        inner_vals_map[p] = [v for _, v in cats]
+        outer_labels.append(p)
+        outer_vals.append(sum(v for _, v in cats))
 
     rows = []
-    for p in product_order:
-        for c in category_order[p]:
-            rows.append({"Product": p, "Category": c, "Count": agg[p][c]})
+    for p in outer_labels:
+        for c, v in zip(inner_labels_map[p], inner_vals_map[p]):
+            rows.append({"Product": p, "Category": c, "Count": v})
     rows.append({"Product": "TOTAL", "Category": "", "Count": sum(outer_vals)})
     st.write("**汇总行数：**"); st.dataframe(pd.DataFrame(rows))
+    with st.expander("数据清洗明细（MAH筛选+去重）"):
+        for s, t in sheet_stats.items():
+            st.write(f"- **{s}**：{t}")
 
     title = f"Post-Marketing ICSR ({start_date.strftime('%Y.%m.%d')}–{end_date.strftime('%Y.%m.%d')})"
     fig = build_chart(outer_labels, outer_vals, inner_labels_map, inner_vals_map, title, label_threshold)
