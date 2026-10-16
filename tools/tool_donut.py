@@ -32,7 +32,7 @@ def find_sheet_by_name(xl, target):
 
 
 def detect_columns(header_row):
-    date_col, source_col, mah_col = None, None, None
+    date_col, source_col, mah_col, case_col = None, None, None, None
     for idx, val in enumerate(header_row):
         s = str(val).lower()
         if source_col is None and "来源" in str(val):
@@ -41,12 +41,25 @@ def detect_columns(header_row):
             date_col = idx
         if mah_col is None and ("mah" in s or "递交编码" in str(val) or "递交编号" in str(val)):
             mah_col = idx
-    return date_col, source_col, mah_col
+        if case_col is None and "case" in s:
+            case_col = idx
+    return date_col, source_col, mah_col, case_col
 
 
-def build_chart(outer_labels, outer_vals, inner_labels_map, inner_vals_map, title_text, inside_thresh=8):
+PALETTES = {
+    "经典": ["#E8792B", "#4A86C7", "#7FB069", "#9B7CC4", "#D46A6A", "#5FA8A0"],
+    "马卡龙": ["#F5A8A8", "#A8D5BA", "#B8A9D9", "#F2D388", "#8FB8D9", "#E8A87C"],
+    "莫兰迪": ["#C9A9A6", "#A8B5A0", "#A6A9B8", "#D4C5A9", "#9FB6C2", "#C2A88F"],
+    "清新果色": ["#F4A261", "#E9C46A", "#8AB17D", "#577590", "#B5838D", "#6D6875"],
+    "北欧灰粉": ["#E8B4B8", "#BFD3C1", "#C8B8DB", "#F0E2B6", "#A8C6D9", "#D9B38C"],
+    "高饱和": ["#E63946", "#2A9D8F", "#E9C46A", "#457B9D", "#9B5DE5", "#F4A261"],
+}
+
+def build_chart(outer_labels, outer_vals, inner_labels_map, inner_vals_map, title_text, inside_thresh=8, palette=None):
+    if palette is None:
+        palette = PALETTES["马卡龙"]
     flat_labels, flat_vals, flat_colors = [], [], []
-    base_colors = ["#E8792B", "#4A86C7", "#7FB069", "#9B7CC4", "#D46A6A", "#5FA8A0"]
+    base_colors = palette
 
     def lighten(hexcolor, t):
         h = hexcolor.lstrip("#")
@@ -54,15 +67,25 @@ def build_chart(outer_labels, outer_vals, inner_labels_map, inner_vals_map, titl
         r = int(r + (255 - r) * t); g = int(g + (255 - g) * t); b = int(b + (255 - b) * t)
         return f"#{r:02x}{g:02x}{b:02x}"
 
+    UNMATCHED = "未映射"
     for pi, prod in enumerate(outer_labels):
-        base = base_colors[pi % len(base_colors)]
+        if prod == UNMATCHED:
+            base = "#b9b9b9"
+        else:
+            base = base_colors[pi % len(base_colors)]
         cats = inner_labels_map[prod]; vals = inner_vals_map[prod]; n = len(cats)
         for ci, (cc, v) in enumerate(zip(cats, vals)):
             flat_labels.append(f"{cc} {v}"); flat_vals.append(v)
-            t = 0.0 if n == 1 else 0.75 * ci / (n - 1)
-            flat_colors.append(lighten(base, t))
+            if prod == UNMATCHED:
+                flat_colors.append("#cfcfcf")
+            else:
+                t = 0.0 if n == 1 else 0.75 * ci / (n - 1)
+                flat_colors.append(lighten(base, t))
 
-    outer_colors = [base_colors[i % len(base_colors)] for i in range(len(outer_vals))]
+    outer_colors = [
+        ("#b9b9b9" if outer_labels[i] == UNMATCHED else base_colors[i % len(base_colors)])
+        for i in range(len(outer_vals))
+    ]
     total = sum(outer_vals)
     fig, ax = plt.subplots(figsize=(9, 7.5), dpi=200); ax.set_aspect("equal")
     res_outer = ax.pie(outer_vals, radius=1.0, colors=outer_colors,
@@ -136,6 +159,7 @@ with c2:
     end_date = st.date_input("结束日期", value=pd.Timestamp("2026-08-31"))
 with c3:
     label_threshold = st.slider("引线阈值(角度)", 0, 20, 8)
+palette_name = st.selectbox("配色", list(PALETTES.keys()), index=0)
 
 if st.button("生成环形图", type="primary"):
     if not f_tracking:
@@ -154,66 +178,96 @@ if st.button("生成环形图", type="primary"):
     prod_col, cat_col, src_col, sheet_col = map_df.columns[0], map_df.columns[1], map_df.columns[2], map_df.columns[3]
     map_df[prod_col] = map_df[prod_col].ffill(); map_df[cat_col] = map_df[cat_col].ffill()
 
+    # 每个 sheet 里"被规则接住"的来源集合（用于识别未映射来源）
+    sheet_source_map = {}
+    for _, row in map_df.iterrows():
+        sv = row[src_col]; sh = str(row[sheet_col]).strip()
+        if pd.isna(sv):
+            continue
+        sheet_source_map.setdefault(normalize_name(sh), set()).add(str(sv).strip())
+
     xl = pd.ExcelFile(f_tracking)
     cache = {}
     sheet_stats = {}
+    sheet_details = {}   # 调试：每个 sheet 最终筛完去重后的明细行
 
     # MAH 编码视为“无效”的取值（空、NA、占位符）
     BAD_MAH = {"", "nan", "na", "n/a", "none", "-", "--", "/", "null", "无", "/无/"}
 
-    def get_counts(sheet_name, source_value, start, end):
-        """计数流程：
-        1) 按报告日期筛出区间内记录；
-        2) 删掉 MAH 递交编码为空 / NA / 占位符的行；
-        3) 在该区间内按 MAH 编码去重（同编码只保留第一条）；
-        4) 统计 source_value 出现次数。
-        """
-        if sheet_name not in cache:
-            actual = find_sheet_by_name(xl, sheet_name)
-            df = pd.read_excel(xl, sheet_name=actual, header=None)
-            dcol, scol, mcol = detect_columns(df.iloc[1])
-            if dcol is None or scol is None:
-                st.error(f"sheet '{actual}' 里没识别到日期/来源列。表头：{list(df.iloc[1].dropna())}"); st.stop()
-            data = df.iloc[2:].copy()
-            # MAH 列统一转字符串、去首尾空格；无 MAH 列就当全空
-            if mcol is None:
-                mah_series = pd.Series([""] * len(data))
-            else:
-                mah_series = data.iloc[:, mcol].apply(
-                    lambda v: "" if pd.isna(v) else str(v).strip()
-                )
-            cache[sheet_name] = (
-                actual,
-                pd.to_datetime(data.iloc[:, dcol], errors="coerce"),
-                data.iloc[:, scol].apply(lambda v: "" if pd.isna(v) else str(v).strip()),
-                mah_series,
+    def _load_sheet(sheet_name):
+        """读取一个 sheet，完成 日期筛选 → 删无MAH → 按MAH去重，
+        并顺带统计该 sheet 未映射的来源。结果按 sheet 缓存。"""
+        if sheet_name in cache:
+            return cache[sheet_name]
+        actual = find_sheet_by_name(xl, sheet_name)
+        df = pd.read_excel(xl, sheet_name=actual, header=None)
+        dcol, scol, mcol, casecol = detect_columns(df.iloc[1])
+        if dcol is None or scol is None:
+            st.error(f"sheet '{actual}' 里没识别到日期/来源列。表头：{list(df.iloc[1].dropna())}"); st.stop()
+        data = df.iloc[2:].copy()
+        # MAH 列统一转字符串、去首尾空格；无 MAH 列就当全空
+        if mcol is None:
+            mah_series = pd.Series([""] * len(data))
+        else:
+            mah_series = data.iloc[:, mcol].apply(
+                lambda v: "" if pd.isna(v) else str(v).strip()
             )
-        actual, dates_raw, sources_raw, mah_raw = cache[sheet_name]
+        # 调试用：case NO. 按表头自动识别（不再写死第2列，避免把"报告获知日期"当 case NO.）
+        if casecol is None:
+            case_series = pd.Series([""] * len(data))
+        else:
+            case_series = data.iloc[:, casecol].apply(
+                lambda v: "" if pd.isna(v) else str(v).strip()
+            )
+        dates_raw = pd.to_datetime(data.iloc[:, dcol], errors="coerce")
+        sources_raw = data.iloc[:, scol].apply(lambda v: "" if pd.isna(v) else str(v).strip())
 
         # 1) 日期筛选（end 含当天 23:59:59）
-        dmask = (dates_raw >= pd.Timestamp(start)) & \
-                (dates_raw <= pd.Timestamp(end) + pd.Timedelta(days=1) - pd.Timedelta(seconds=1))
+        dmask = (dates_raw >= pd.Timestamp(start_date)) & \
+                (dates_raw <= pd.Timestamp(end_date) + pd.Timedelta(days=1) - pd.Timedelta(seconds=1))
         n_date = int(dmask.sum())
+        d = dates_raw[dmask].reset_index(drop=True)
         s = sources_raw[dmask].reset_index(drop=True)
-        m = mah_raw[dmask].reset_index(drop=True)
+        m = mah_series[dmask].reset_index(drop=True)
+        c = case_series[dmask].reset_index(drop=True)
 
         # 2) 删掉 MAH 为空 / NA / 占位符
         valid_mask = ~m.str.lower().isin(BAD_MAH)
+        d = d[valid_mask].reset_index(drop=True)
         s = s[valid_mask].reset_index(drop=True)
         m = m[valid_mask].reset_index(drop=True)
+        c = c[valid_mask].reset_index(drop=True)
         n_valid = len(s)
 
         # 3) 在该区间内按 MAH 编码去重
         keep_mask = ~m.duplicated(keep="first")
+        d = d[keep_mask].reset_index(drop=True)
         s = s[keep_mask].reset_index(drop=True)
         m = m[keep_mask].reset_index(drop=True)
+        c = c[keep_mask].reset_index(drop=True)
         n_final = len(s)
 
         sheet_stats[actual] = f"日期内 {n_date} 行 → 有MAH编码 {n_valid} 行 → 去重后 {n_final} 行"
+        # 缓存明细，供下面调试面板展示
+        sheet_details[actual] = pd.DataFrame({
+            "日期": d.dt.strftime("%Y-%m-%d"),
+            "来源": s,
+            "MAH递交编码": m,
+            "case NO.": c,
+        })
 
-        # 4) 计数
+        # 4) 未映射：本 sheet 去重后、来源不在该 sheet 规则集合里的行
+        srcset = sheet_source_map.get(normalize_name(actual), set())
+        un = s[~s.isin(srcset)].value_counts().to_dict()
+
+        cache[sheet_name] = {"actual": actual, "sources": s, "unmatched": un}
+        return cache[sheet_name]
+
+    def get_counts(sheet_name, source_value, start, end):
+        """按规则统计：source_value 在对应 sheet 去重后记录中出现的次数。"""
+        rec = _load_sheet(sheet_name)
         target = str(source_value).strip()
-        return int((s == target).sum())
+        return int((rec["sources"] == target).sum())
 
     agg, product_order, category_order = {}, [], {}
     for _, row in map_df.iterrows():
@@ -228,6 +282,18 @@ if st.button("生成环形图", type="primary"):
         if cat not in agg[prod]:
             agg[prod][cat] = 0; category_order[prod].append(cat)
         agg[prod][cat] += cnt
+
+    # 汇总未映射来源（跨所有被 mapping 引用的 sheet）
+    unmatched_total = 0
+    unmatched_rows = []
+    for rec in cache.values():
+        for src, cnt in rec["unmatched"].items():
+            src = str(src).strip()
+            if not src or src.lower() == "nan":
+                continue
+            unmatched_rows.append((rec["actual"], src, int(cnt)))
+            unmatched_total += int(cnt)
+    unmatched_rows.sort(key=lambda t: t[2], reverse=True)
 
     outer_labels = []
     outer_vals = []
@@ -244,18 +310,34 @@ if st.button("生成环形图", type="primary"):
         outer_labels.append(p)
         outer_vals.append(sum(v for _, v in cats))
 
+    # 未映射来源：只在页面以列表展示，不画进图（图上 Total = 已映射数）
     rows = []
     for p in outer_labels:
         for c, v in zip(inner_labels_map[p], inner_vals_map[p]):
             rows.append({"Product": p, "Category": c, "Count": v})
     rows.append({"Product": "TOTAL", "Category": "", "Count": sum(outer_vals)})
     st.write("**汇总行数：**"); st.dataframe(pd.DataFrame(rows))
+    with st.expander(f"未映射来源（未被任何规则归类 · 共 {unmatched_total} 条，仅列表展示）"):
+        mapped = sum(outer_vals)
+        st.write(f"去重后有效 **{mapped + unmatched_total}** ＝ 图上已映射 **{mapped}** ＋ 未映射 **{unmatched_total}**")
+        if unmatched_rows:
+            st.dataframe(pd.DataFrame(unmatched_rows, columns=["Sheet", "来源", "数量"]),
+                         use_container_width=True)
+            st.info("这些来源没匹配到 mapping 里的任何规则，所以没被归到分类（图上灰色『未映射』块）。"
+                    "在 map.xlsx 里补一行对应规则即可：产品、分类、来源关键词、使用sheet。")
+        else:
+            st.success("所有来源都已匹配到规则，无未映射。")
     with st.expander("数据清洗明细（MAH筛选+去重）"):
         for s, t in sheet_stats.items():
             st.write(f"- **{s}**：{t}")
+        st.markdown("---")
+        st.write("**每个 sheet 最终计入的明细行**（日期筛完 → 删无MAH → 去重后）：")
+        for sheet_name, df_detail in sheet_details.items():
+            st.write(f"📄 **{sheet_name}**（共 {len(df_detail)} 行）")
+            st.dataframe(df_detail, use_container_width=True, height=200)
 
     title = f"Post-Marketing ICSR ({start_date.strftime('%Y.%m.%d')}–{end_date.strftime('%Y.%m.%d')})"
-    fig = build_chart(outer_labels, outer_vals, inner_labels_map, inner_vals_map, title, label_threshold)
+    fig = build_chart(outer_labels, outer_vals, inner_labels_map, inner_vals_map, title, label_threshold, palette=PALETTES[palette_name])
     st.pyplot(fig)
 
     b_png = io.BytesIO(); fig.savefig(b_png, format="png", dpi=200, bbox_inches="tight", facecolor="white"); b_png.seek(0)

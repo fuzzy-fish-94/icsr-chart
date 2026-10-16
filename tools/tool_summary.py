@@ -167,7 +167,17 @@ def build_text(text_cfg, agg, start, end):
 
 
 # ---------- 图 ----------
-def build_figure(chart_result, text_product_names, start, end):
+# 配色方案：(NSADR色, 其他色)
+PALETTES_SUMMARY = {
+    "马卡龙": ("#A8D5BA", "#F2B8A0"),
+    "莫兰迪": ("#A8B5A0", "#C2A88F"),
+    "清新果色": ("#8AB17D", "#F4A261"),
+    "北欧灰粉": ("#BFD3C1", "#E8B4B8"),
+    "高饱和": ("#2A9D8F", "#E76F51"),
+}
+
+
+def build_figure(chart_result, text_product_names, start, end, palette=("A8D5BA", "F2B8A0")):
     short_names = list(chart_result.keys())
     names = text_product_names[: len(short_names)]
     ns_vals = [chart_result[p][0] for p in short_names]
@@ -175,7 +185,7 @@ def build_figure(chart_result, text_product_names, start, end):
 
     y = np.arange(len(names))
     fig, ax = plt.subplots(figsize=(10, 2.0 * len(names)), dpi=200)
-    c_ns, c_ot = "#7FB069", "#E8792B"
+    c_ns, c_ot = palette
     ax.barh(y, ns_vals, color=c_ns, edgecolor="white", height=0.55, label="NSADR（上市后研究）")
     ax.barh(y, ot_vals, left=ns_vals, color=c_ot, edgecolor="white", height=0.55, label="其他（自发/反馈/SADR研究等）")
     xmax = max(ns_vals[i] + ot_vals[i] for i in range(len(names))) or 1
@@ -226,6 +236,7 @@ with c1:
     start = st.date_input("开始日期", value=pd.Timestamp("2025-11-26"))
 with c2:
     end = st.date_input("结束日期", value=pd.Timestamp("2026-01-30"))
+palette_name = st.selectbox("配色", list(PALETTES_SUMMARY.keys()), index=0)
 
 if st.button("生成小结", type="primary"):
     if not f:
@@ -250,7 +261,7 @@ if st.button("生成小结", type="primary"):
     st.download_button("下载小结 .txt", text, file_name="ICSR_summary.txt", mime="text/plain")
 
     st.subheader("② NSADR vs 其他 对比图")
-    fig = build_figure(chart_result, list(text_agg.keys()), start, end)
+    fig = build_figure(chart_result, list(text_agg.keys()), start, end, palette=PALETTES_SUMMARY[palette_name])
     st.pyplot(fig)
     bp = io.BytesIO(); fig.savefig(bp, format="png", dpi=200, bbox_inches="tight", facecolor="white"); bp.seek(0)
     bs = io.BytesIO(); fig.savefig(bs, format="svg", bbox_inches="tight", facecolor="white"); bs.seek(0)
