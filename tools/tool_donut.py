@@ -88,30 +88,24 @@ def build_chart(outer_labels, outer_vals, inner_labels_map, inner_vals_map, titl
     ]
     total = sum(outer_vals)
     fig, ax = plt.subplots(figsize=(9, 7.5), dpi=200); ax.set_aspect("equal")
-    res_outer = ax.pie(outer_vals, radius=1.0, colors=outer_colors,
+    # 环层：外圈=分类，中圈=产品，中心=Total（已按需求调换：产品在中间，分类在最外）
+    res_outer = ax.pie(flat_vals, radius=1.0, colors=flat_colors,
                        wedgeprops=dict(width=0.30, edgecolor="white", linewidth=2), startangle=90, counterclock=False)
-    res_inner = ax.pie(flat_vals, radius=0.70, colors=flat_colors,
-                       wedgeprops=dict(width=0.30, edgecolor="white", linewidth=1.5), startangle=90, counterclock=False)
+    res_mid = ax.pie(outer_vals, radius=0.70, colors=outer_colors,
+                     wedgeprops=dict(width=0.30, edgecolor="white", linewidth=1.5), startangle=90, counterclock=False)
     ax.text(0, 0, f"Total {total}", ha="center", va="center", fontsize=18, fontweight="bold", color="#222")
 
-    # 外圈：产品名 + 例数
-    for i, w in enumerate(res_outer[0]):
-        ang = (w.theta2 + w.theta1) / 2.0
-        x = 0.85 * np.cos(np.deg2rad(ang)); y = 0.85 * np.sin(np.deg2rad(ang))
-        ax.text(x, y, f"{outer_labels[i]}\n{outer_vals[i]}",
-                ha="center", va="center", fontsize=10, color="black")
-
+    # 外圈：分类名 + 例数（径向文字，左半边翻转180°保证正读）
     outside_items = []
-    for i, w in enumerate(res_inner[0]):
+    for i, w in enumerate(res_outer[0]):
         ang = (w.theta2 + w.theta1) / 2.0
         size = (w.theta2 - w.theta1)
         if size >= inside_thresh:
-            x, y = 0.55 * np.cos(np.deg2rad(ang)), 0.55 * np.sin(np.deg2rad(ang))
+            x, y = 0.85 * np.cos(np.deg2rad(ang)), 0.85 * np.sin(np.deg2rad(ang))
             lbl = flat_labels[i]
             if len(lbl) > 14:
                 words = lbl.split(); mid = len(words) // 2
                 lbl = " ".join(words[:mid]) + "\n" + " ".join(words[mid:])
-            # 内圈文字沿半径方向（径向），左半边翻转180°保证正读
             rot = ang
             if ang > 90:
                 rot -= 180
@@ -134,9 +128,16 @@ def build_chart(outer_labels, outer_vals, inner_labels_map, inner_vals_map, titl
             xt = 1.12 if side == "right" else -1.12
             ha = "left" if side == "right" else "right"
             for (ang, label), yt in zip(group, ys):
-                ax.annotate(label, xy=(0.70 * np.cos(np.deg2rad(ang)), 0.70 * np.sin(np.deg2rad(ang))),
+                ax.annotate(label, xy=(0.85 * np.cos(np.deg2rad(ang)), 0.85 * np.sin(np.deg2rad(ang))),
                             xytext=(xt, yt), fontsize=7, color="black",
                             arrowprops=dict(arrowstyle="-", color="#999", lw=0.6), ha=ha, va="center")
+
+    # 中圈：产品名 + 例数
+    for i, w in enumerate(res_mid[0]):
+        ang = (w.theta2 + w.theta1) / 2.0
+        x = 0.55 * np.cos(np.deg2rad(ang)); y = 0.55 * np.sin(np.deg2rad(ang))
+        ax.text(x, y, f"{outer_labels[i]}\n{outer_vals[i]}",
+                ha="center", va="center", fontsize=10, color="black")
 
     ax.set_title(title_text, fontsize=13, color="#333", pad=18)
     fig.text(0.92, 0.04, "*NSADR = non-serious ADR; SADR = serious", ha="right", fontsize=7, color="#555", style="italic")
