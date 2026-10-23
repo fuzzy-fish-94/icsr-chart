@@ -95,42 +95,42 @@ def build_chart(outer_labels, outer_vals, inner_labels_map, inner_vals_map, titl
                      wedgeprops=dict(width=0.30, edgecolor="white", linewidth=1.5), startangle=90, counterclock=False)
     ax.text(0, 0, f"Total {total}", ha="center", va="center", fontsize=18, fontweight="bold", color="#222")
 
-    # 外圈：分类名 + 例数（径向文字，左半边翻转180°保证正读）
-    outside_items = []
+    # 外圈：分类名 + 例数；大块文字在扇区内部，小块被引线引出时文字水平摆平（贴着自己色块）
     for i, w in enumerate(res_outer[0]):
         ang = (w.theta2 + w.theta1) / 2.0
         size = (w.theta2 - w.theta1)
+        lbl = flat_labels[i]
+        if len(lbl) > 14:
+            words = lbl.split(); mid = len(words) // 2
+            lbl = " ".join(words[:mid]) + "\n" + " ".join(words[mid:])
         if size >= inside_thresh:
+            # 大块：文字画在扇区内部（径向，左半边翻转180°保证正读）
             x, y = 0.85 * np.cos(np.deg2rad(ang)), 0.85 * np.sin(np.deg2rad(ang))
-            lbl = flat_labels[i]
-            if len(lbl) > 14:
-                words = lbl.split(); mid = len(words) // 2
-                lbl = " ".join(words[:mid]) + "\n" + " ".join(words[mid:])
             rot = ang
             if ang > 90:
                 rot -= 180
             elif ang < -90:
                 rot += 180
-            ax.text(x, y, lbl, ha="center", va="center", fontsize=7.5,
+            ax.text(x, y, lbl, ha="center", va="center", fontsize=7.0,
                     rotation=rot, rotation_mode="anchor")
         else:
-            outside_items.append((ang, flat_labels[i]))
-
-    if outside_items:
-        right = [(a, l) for a, l in outside_items if np.cos(np.deg2rad(a)) > 0]
-        left = [(a, l) for a, l in outside_items if np.cos(np.deg2rad(a)) <= 0]
-        for group, side in [(right, "right"), (left, "left")]:
-            if not group:
-                continue
-            group.sort(key=lambda t: np.sin(np.deg2rad(t[0])))
-            n = len(group)
-            ys = np.linspace(-0.5, 0.5, n) if n > 1 else [np.sin(np.deg2rad(group[0][0]))]
-            xt = 1.12 if side == "right" else -1.12
-            ha = "left" if side == "right" else "right"
-            for (ang, label), yt in zip(group, ys):
-                ax.annotate(label, xy=(0.85 * np.cos(np.deg2rad(ang)), 0.85 * np.sin(np.deg2rad(ang))),
-                            xytext=(xt, yt), fontsize=7, color="black",
-                            arrowprops=dict(arrowstyle="-", color="#999", lw=0.6), ha=ha, va="center")
+            # 小块：文字水平摆平，短肘形引线（横段连字 + 折弯连色块边缘）
+            cos_a = np.cos(np.deg2rad(ang)); sin_a = np.sin(np.deg2rad(ang))
+            if cos_a > 0.3:
+                ha = "left"
+            elif cos_a < -0.3:
+                ha = "right"
+            else:
+                ha = "center"
+            # 文字锚点（紧贴文字那端）
+            tx, ty = 1.08 * cos_a, 1.08 * sin_a
+            # 折弯点：与文字同水平线、略微靠近色块
+            kx, ky = 1.03 * cos_a, ty
+            # 色块外边缘
+            bx, by = 1.0 * cos_a, 1.0 * sin_a
+            ax.plot([tx, kx], [ty, ky], color="#999", lw=0.6)
+            ax.plot([kx, bx], [ky, by], color="#999", lw=0.6)
+            ax.text(tx, ty, lbl, ha=ha, va="center", fontsize=6.5, rotation=0)
 
     # 中圈：产品名 + 例数
     for i, w in enumerate(res_mid[0]):
