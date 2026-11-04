@@ -75,7 +75,7 @@ def build_chart(outer_labels, outer_vals, inner_labels_map, inner_vals_map, titl
             base = base_colors[pi % len(base_colors)]
         cats = inner_labels_map[prod]; vals = inner_vals_map[prod]; n = len(cats)
         for ci, (cc, v) in enumerate(zip(cats, vals)):
-            flat_labels.append(f"{cc} {v}"); flat_vals.append(v)
+            flat_labels.append(f"{cc}\n{v}"); flat_vals.append(v)
             if prod == UNMATCHED:
                 flat_colors.append("#cfcfcf")
             else:
@@ -99,10 +99,12 @@ def build_chart(outer_labels, outer_vals, inner_labels_map, inner_vals_map, titl
     for i, w in enumerate(res_outer[0]):
         ang = (w.theta2 + w.theta1) / 2.0
         size = (w.theta2 - w.theta1)
-        lbl = flat_labels[i]
-        if len(lbl) > 14:
-            words = lbl.split(); mid = len(words) // 2
-            lbl = " ".join(words[:mid]) + "\n" + " ".join(words[mid:])
+        lbl = flat_labels[i]                      # 形如 "分类名\n数字"
+        name, num = lbl.rsplit("\n", 1)           # 分类名过长时只在名字内折行，数字保持单独一行
+        if len(name) > 14:
+            words = name.split(); mid = len(words) // 2
+            name = " ".join(words[:mid]) + "\n" + " ".join(words[mid:])
+            lbl = name + "\n" + num
         if size >= inside_thresh:
             # 大块：文字画在扇区内部（径向，左半边翻转180°保证正读）
             x, y = 0.85 * np.cos(np.deg2rad(ang)), 0.85 * np.sin(np.deg2rad(ang))
@@ -114,23 +116,18 @@ def build_chart(outer_labels, outer_vals, inner_labels_map, inner_vals_map, titl
             ax.text(x, y, lbl, ha="center", va="center", fontsize=7.0,
                     rotation=rot, rotation_mode="anchor")
         else:
-            # 小块：文字水平摆平，短肘形引线（横段连字 + 折弯连色块边缘）
+            # 小块：文字水平摆平；肘形引线 = 色块边缘 → 径向短段 → 水平段 → 文字（文字在水平末端，不穿字）
             cos_a = np.cos(np.deg2rad(ang)); sin_a = np.sin(np.deg2rad(ang))
-            if cos_a > 0.3:
-                ha = "left"
-            elif cos_a < -0.3:
-                ha = "right"
-            else:
-                ha = "center"
-            # 文字锚点（紧贴文字那端）
-            tx, ty = 1.08 * cos_a, 1.08 * sin_a
-            # 折弯点：与文字同水平线、略微靠近色块
-            kx, ky = 1.03 * cos_a, ty
-            # 色块外边缘
-            bx, by = 1.0 * cos_a, 1.0 * sin_a
-            ax.plot([tx, kx], [ty, ky], color="#999", lw=0.6)
-            ax.plot([kx, bx], [ky, by], color="#999", lw=0.6)
-            ax.text(tx, ty, lbl, ha=ha, va="center", fontsize=6.5, rotation=0)
+            sign = 1 if cos_a >= 0 else -1
+            ha = "left" if sign > 0 else "right"
+            bx, by = 1.0 * cos_a, 1.0 * sin_a      # 色块外边缘
+            mx, my = 1.05 * cos_a, 1.05 * sin_a    # 折弯点（径向外移一小段）
+            tx = mx + sign * 0.12                  # 文字紧贴折弯点外侧一小段，引线短
+            ty = my                                # 与折弯点同一水平线
+            ax.plot([bx, mx], [by, my], color="#999", lw=0.6)   # 径向短段
+            ax.plot([mx, tx], [my, ty], color="#999", lw=0.6)   # 水平段（不穿字）
+            ax.text(tx, ty, lbl, ha=ha, va="center", fontsize=6.5,
+                    rotation=0, multialignment="center")
 
     # 中圈：产品名 + 例数
     for i, w in enumerate(res_mid[0]):
@@ -140,7 +137,7 @@ def build_chart(outer_labels, outer_vals, inner_labels_map, inner_vals_map, titl
                 ha="center", va="center", fontsize=10, color="black")
 
     ax.set_title(title_text, fontsize=13, color="#333", pad=18)
-    fig.text(0.92, 0.04, "*NSADR = non-serious ADR; SADR = serious", ha="right", fontsize=7, color="#555", style="italic")
+    fig.text(0.92, 0.04, "*IIT=Investigator Initiated Trial, PMK=Post-MarKeting, HA=Health Authority", ha="right", fontsize=7, color="#555", style="italic")
     plt.tight_layout()
     return fig
 
