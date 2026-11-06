@@ -1,7 +1,7 @@
 """
 工具①：双层环形图 Donut
 ========================
-上传 AE 追踪表 + 映射表(map.xlsx)，选日期范围，生成双层环形图。
+上传 AE 追踪表（主表 + 可选 128SADR 独立表）+ 映射表(map.xlsx)，选日期范围，生成双层环形图。
 这个文件完全独立，改它不影响别的工具。
 """
 import io
@@ -147,7 +147,8 @@ st.title("🍩 Post-Marketing ICSR Donut Chart")
 st.write("上传 AE 追踪表 + 映射表，选日期范围，生成双层环形图。")
 
 DEFAULT_MAP_PATH = "map.xlsx"
-f_tracking = st.file_uploader("上传 AE Tracking Table (.xlsx)", type=["xlsx"])
+f_tracking = st.file_uploader("① 主 AE Tracking Table (.xlsx)", type=["xlsx"])
+f_split = st.file_uploader("② 128SADR 独立追踪表 (.xlsx) —— 已从主表拆出就上传；没有可留空", type=["xlsx"])
 f_mapping = st.file_uploader("上传 Mapping Table (.xlsx) —— 留空则用默认 map.xlsx", type=["xlsx"])
 
 c1, c2, c3 = st.columns(3)
@@ -184,20 +185,64 @@ if st.button("生成环形图", type="primary"):
             continue
         sheet_source_map.setdefault(normalize_name(sh), set()).add(str(sv).strip())
 
-    xl = pd.ExcelFile(f_tracking)
+    # 全表所有 map 来源（独立表不隶属单一 sheet，未映射判定用并集）
+    all_map_sources = set()
+    for _, row in map_df.iterrows():
+        sv = row[src_col]
+        if not pd.isna(sv):
+            all_map_sources.add(str(sv).strip())
+
+    # 数据源：主表（必填）+ 128SADR 独立表（可选）。同一套 map 规则对两个文件分别统计后相加，
+    # 不做跨文件去重；主表里仍然残留的"已拆出来源"会自动剔除，避免两边各算一次。
+    SOURCES = [("主表", f_tracking)]
+    if f_split is not None:
+        SOURCES.append(("128SADR", f_split))
+    xls = {name: pd.ExcelFile(f) for name, f in SOURCES}
+
     cache = {}
     sheet_stats = {}
-    sheet_details = {}   # 调试：每个 sheet 最终筛完去重后的明细行
+    sheet_details = {}   # 调试：每个 文件·sheet 最终筛完去重后的明细行
+    warn_msgs = []
+
+    # 拆出文件里出现过的"来源"取值（归一化），用于把主表里的同一批记录剔掉
+    split_sources = set()
+    if f_split is not None:
+        for sname in xls["128SADR"].sheet_names:
+            probe = pd.read_excel(xls["128SADR"], sheet_name=sname, header=None, nrows=2)
+            if len(probe) < 2:
+                continue
+            _, pscol, _, _ = detect_columns(probe.iloc[1])
+            if pscol is None:
+                continue
+            body = pd.read_excel(xls["128SADR"], sheet_name=sname, header=None).iloc[2:]
+            vals = body.iloc[:, pscol].apply(lambda v: "" if pd.isna(v) else normalize_name(v))
+            split_sources |= {v for v in vals if v}
+
+    def _find_sheet(xl, target):
+        """先按 sheet 名匹配；被拆出来的单 sheet 文件（常叫 Sheet1）按表头特征兜底认领。"""
+        try:
+            return find_sheet_by_name(xl, target)
+        except ValueError:
+            if len(xl.sheet_names) == 1:
+                only = xl.sheet_names[0]
+                probe = pd.read_excel(xl, sheet_name=only, header=None, nrows=2)
+                if len(probe) >= 2:
+                    dcol, scol, _, _ = detect_columns(probe.iloc[1])
+                    if dcol is not None and scol is not None:
+                        return only
+            raise
 
     # MAH 编码视为“无效”的取值（空、NA、占位符）
     BAD_MAH = {"", "nan", "na", "n/a", "none", "-", "--", "/", "null", "无", "/无/"}
 
-    def _load_sheet(sheet_name):
-        """读取一个 sheet，完成 日期筛选 → 删无MAH → 按MAH去重，
-        并顺带统计该 sheet 未映射的来源。结果按 sheet 缓存。"""
-        if sheet_name in cache:
-            return cache[sheet_name]
-        actual = find_sheet_by_name(xl, sheet_name)
+    def _load_sheet(src_name, sheet_name):
+        """读取一个 文件·sheet：日期筛选 → 主表剔除已拆出来源 → 删无MAH → 按MAH去重，
+        并顺带统计该 sheet 未映射的来源。结果按 (文件, sheet) 缓存。"""
+        xl = xls[src_name]
+        actual = _find_sheet(xl, sheet_name)
+        key = (src_name, actual)
+        if key in cache:
+            return cache[key]
         df = pd.read_excel(xl, sheet_name=actual, header=None)
         dcol, scol, mcol, casecol = detect_columns(df.iloc[1])
         if dcol is None or scol is None:
@@ -229,6 +274,16 @@ if st.button("生成环形图", type="primary"):
         m = mah_series[dmask].reset_index(drop=True)
         c = case_series[dmask].reset_index(drop=True)
 
+        # 1.5) 主表里剔除已经拆到 128SADR 独立文件的来源（否则两个文件各算一次会虚高）
+        n_excluded = 0
+        if src_name == "主表" and split_sources:
+            ex = s.str.lower().isin(split_sources)
+            n_excluded = int(ex.sum())
+            d = d[~ex].reset_index(drop=True)
+            s = s[~ex].reset_index(drop=True)
+            m = m[~ex].reset_index(drop=True)
+            c = c[~ex].reset_index(drop=True)
+
         # 2) 删掉 MAH 为空 / NA / 占位符
         valid_mask = ~m.str.lower().isin(BAD_MAH)
         d = d[valid_mask].reset_index(drop=True)
@@ -245,27 +300,47 @@ if st.button("生成环形图", type="primary"):
         c = c[keep_mask].reset_index(drop=True)
         n_final = len(s)
 
-        sheet_stats[actual] = f"日期内 {n_date} 行 → 有MAH编码 {n_valid} 行 → 去重后 {n_final} 行"
+        label = f"{src_name}·{actual}"
+        excl_note = f"，已剔除拆出记录 {n_excluded} 行" if n_excluded else ""
+        sheet_stats[label] = f"日期内 {n_date} 行{excl_note} → 有MAH编码 {n_valid} 行 → 去重后 {n_final} 行"
         # 缓存明细，供下面调试面板展示
-        sheet_details[actual] = pd.DataFrame({
+        sheet_details[label] = pd.DataFrame({
             "日期": d.dt.strftime("%Y-%m-%d"),
             "来源": s,
             "MAH递交编码": m,
             "case NO.": c,
         })
 
-        # 4) 未映射：本 sheet 去重后、来源不在该 sheet 规则集合里的行
-        srcset = sheet_source_map.get(normalize_name(actual), set())
+        # 4) 未映射：本 sheet 去重后、来源不在 map 规则集合里的行
+        #    主表按 map 里该 sheet 的规则判定；独立表按全表 map 来源并集判定（它不隶属某个 sheet）
+        if src_name == "主表":
+            srcset = sheet_source_map.get(normalize_name(sheet_name), set())
+        else:
+            srcset = all_map_sources
         un = s[~s.isin(srcset)].value_counts().to_dict()
 
-        cache[sheet_name] = {"actual": actual, "sources": s, "unmatched": un}
-        return cache[sheet_name]
+        cache[key] = {"actual": actual, "label": label, "sources": s,
+                      "unmatched": un, "n_excluded": n_excluded}
+        return cache[key]
 
-    def get_counts(sheet_name, source_value, start, end):
-        """按规则统计：source_value 在对应 sheet 去重后记录中出现的次数。"""
-        rec = _load_sheet(sheet_name)
+    def get_counts(sheet_name, source_value, start=None, end=None):
+        """按规则统计：该来源值在各文件对应 sheet 去重后出现的次数之和（不跨文件去重）。"""
         target = str(source_value).strip()
-        return int((rec["sources"] == target).sum())
+        total = 0
+        for src_name, _f in SOURCES:
+            try:
+                rec = _load_sheet(src_name, sheet_name)
+            except ValueError:
+                if src_name == "主表":
+                    st.error(f"map 里的使用sheet「{sheet_name}」在主表里没找到。主表 sheet：{xls['主表'].sheet_names}")
+                    st.stop()
+                msg = (f"map 里的使用sheet「{sheet_name}」在 {src_name} 表里没找到"
+                       f"（该表 sheet：{xls[src_name].sheet_names}），这条规则不计该文件。")
+                if msg not in warn_msgs:
+                    warn_msgs.append(msg)
+                continue
+            total += int((rec["sources"] == target).sum())
+        return total
 
     agg, product_order, category_order = {}, [], {}
     for _, row in map_df.iterrows():
@@ -289,7 +364,7 @@ if st.button("生成环形图", type="primary"):
             src = str(src).strip()
             if not src or src.lower() == "nan":
                 continue
-            unmatched_rows.append((rec["actual"], src, int(cnt)))
+            unmatched_rows.append((rec["label"], src, int(cnt)))
             unmatched_total += int(cnt)
     unmatched_rows.sort(key=lambda t: t[2], reverse=True)
 
@@ -308,6 +383,20 @@ if st.button("生成环形图", type="primary"):
         outer_labels.append(p)
         outer_vals.append(sum(v for _, v in cats))
 
+    with st.expander(f"数据源校验（本次读取 {len(SOURCES)} 个文件）"):
+        st.write("**读取的文件：** " + "；".join(n for n, _ in SOURCES))
+        if f_split is not None:
+            st.write(f"**128SADR 表识别到的来源：** {sorted(split_sources) if split_sources else '无'}")
+            ex_total = sum(r.get("n_excluded", 0) for r in cache.values())
+            if ex_total:
+                st.warning(f"主表里仍有 {ex_total} 条属于 128SADR 的记录，已自动剔除（否则会和独立表重复计数）。建议后续把主表这部分清理掉。")
+            else:
+                st.success("主表已无 128SADR 记录，两个文件数据无重叠。")
+        else:
+            st.info("未上传 128SADR 独立表，按单文件统计。")
+        for m_ in warn_msgs:
+            st.warning(m_)
+
     # 未映射来源：只在页面以列表展示，不画进图（图上 Total = 已映射数）
     rows = []
     for p in outer_labels:
@@ -319,7 +408,7 @@ if st.button("生成环形图", type="primary"):
         mapped = sum(outer_vals)
         st.write(f"去重后有效 **{mapped + unmatched_total}** ＝ 图上已映射 **{mapped}** ＋ 未映射 **{unmatched_total}**")
         if unmatched_rows:
-            st.dataframe(pd.DataFrame(unmatched_rows, columns=["Sheet", "来源", "数量"]),
+            st.dataframe(pd.DataFrame(unmatched_rows, columns=["文件·Sheet", "来源", "数量"]),
                          use_container_width=True)
             st.info("这些来源没匹配到 mapping 里的任何规则，所以没被归到分类（图上灰色『未映射』块）。"
                     "在 map.xlsx 里补一行对应规则即可：产品、分类、来源关键词、使用sheet。")
